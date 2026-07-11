@@ -32,7 +32,7 @@ const TOOLS = [
       properties: {
         title: { type: "string", description: "Task title" },
         description: { type: "string", description: "Task details" },
-        assigned_to_id: { type: "string", description: "User ID (get from get_team_summary)" },
+        assigned_to_id: { type: "string", description: "User ID from get_team_summary" },
         due_date: { type: "string", description: "Due date YYYY-MM-DD" },
         priority: { type: "string", enum: ["low", "medium", "high"] },
       },
@@ -51,7 +51,7 @@ async function callAutomate(endpoint, method = "GET", body = null) {
   return res.json();
 }
 
-async function handleTool(name, input) {
+async function handleTool(name, input = {}) {
   if (name === "get_users") {
     const data = await callAutomate("getTaskUsers");
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
@@ -61,16 +61,16 @@ async function handleTool(name, input) {
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
   if (name === "get_team_summary") {
-    const KNOWN = {
-      "c3d145dc-fc15-417d-a840-b68ee40f891d": "Rituraj Priyani — HR",
-      "fb1f3c90-bdca-4f5b-bce0-97ffc88d037b": "Parth Dave — Sales",
-      "2e2704b1-f770-4ccc-8ffe-902f877353a7": "Girish Sivaramakrishnan — Production",
-      "20ca3a59-663b-4918-80f4-ee251e398f20": "Rishita Ramrakhyani — Accounts",
-      "e7696867-3da6-41ef-8f67-f30680078493": "Sujit Devmurari — Quality",
-      "1b3862e1-aded-445d-b1de-8821ab8c8e51": "Chirag Thakkar — CEO",
-    };
-    const summary = Object.entries(KNOWN).map(([id, name]) => ({ id, name }));
-    return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+    const KNOWN = [
+      { id: "c3d145dc-fc15-417d-a840-b68ee40f891d", name: "Rituraj Priyani", role: "HR" },
+      { id: "fb1f3c90-bdca-4f5b-bce0-97ffc88d037b", name: "Parth Dave", role: "Sales" },
+      { id: "2e2704b1-f770-4ccc-8ffe-902f877353a7", name: "Girish Sivaramakrishnan", role: "Production" },
+      { id: "20ca3a59-663b-4918-80f4-ee251e398f20", name: "Rishita Ramrakhyani", role: "Accounts" },
+      { id: "e7696867-3da6-41ef-8f67-f30680078493", name: "Sujit Devmurari", role: "Quality" },
+      { id: "1b3862e1-aded-445d-b1de-8821ab8c8e51", name: "Chirag Thakkar", role: "CEO" },
+      { id: "himanshu-purohit-id", name: "Himanshu Purohit", role: "Marketing" },
+    ];
+    return { content: [{ type: "text", text: JSON.stringify(KNOWN, null, 2) }] };
   }
   if (name === "assign_task") {
     const payload = {
@@ -90,8 +90,40 @@ async function handleTool(name, input) {
   throw new Error(`Unknown tool: ${name}`);
 }
 
-// MCP JSON-RPC handler
-app.post("/mcp", async (req, res) => {
+// SSE endpoint — Claude custom connector uses this
+app.get("/sse", async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders();
+
+  const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+
+  // Send server info
+  send({
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: { tools: {} },
+      serverInfo: { name: "automateapp-mcp", version: "1.0.0" },
+    },
+  });
+
+  // Send tools list
+  send({
+    jsonrpc: "2.0",
+    id: "tools-init",
+    result: { tools: TOOLS },
+  });
+
+  const keepAlive = setInterval(() => res.write(": ping\n\n"), 15000);
+  req.on("close", () => clearInterval(keepAlive));
+});
+
+// POST messages endpoint — Claude sends tool calls here
+app.post("/messages", async (req, res) => {
   const { jsonrpc, id, method, params } = req.body;
 
   try {
@@ -101,24 +133,20 @@ app.post("/mcp", async (req, res) => {
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "automateapp", version: "1.0.0" },
+          serverInfo: { name: "automateapp-mcp", version: "1.0.0" },
         },
       });
     }
-
+    if (method === "notifications/initialized") {
+      return res.status(204).end();
+    }
     if (method === "tools/list") {
       return res.json({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
     }
-
     if (method === "tools/call") {
       const result = await handleTool(params.name, params.arguments || {});
       return res.json({ jsonrpc: "2.0", id, result });
     }
-
-    if (method === "notifications/initialized") {
-      return res.json({ jsonrpc: "2.0", id, result: {} });
-    }
-
     return res.json({
       jsonrpc: "2.0", id,
       error: { code: -32601, message: `Method not found: ${method}` },
@@ -131,28 +159,36 @@ app.post("/mcp", async (req, res) => {
   }
 });
 
-// SSE endpoint for Claude
-app.get("/sse", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-
-  res.write(`data: ${JSON.stringify({
-    jsonrpc: "2.0",
-    method: "notifications/initialized",
-    params: {}
-  })}\n\n`);
-
-  const keepAlive = setInterval(() => {
-    res.write(": ping\n\n");
-  }, 15000);
-
-  req.on("close", () => clearInterval(keepAlive));
+// Also handle /mcp POST
+app.post("/mcp", async (req, res) => {
+  const { jsonrpc, id, method, params } = req.body;
+  try {
+    if (method === "initialize") {
+      return res.json({
+        jsonrpc: "2.0", id,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "automateapp-mcp", version: "1.0.0" },
+        },
+      });
+    }
+    if (method === "notifications/initialized") return res.status(204).end();
+    if (method === "tools/list") {
+      return res.json({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
+    }
+    if (method === "tools/call") {
+      const result = await handleTool(params.name, params.arguments || {});
+      return res.json({ jsonrpc: "2.0", id, result });
+    }
+    return res.json({ jsonrpc: "2.0", id, error: { code: -32601, message: `Unknown: ${method}` } });
+  } catch (err) {
+    return res.json({ jsonrpc: "2.0", id, error: { code: -32000, message: err.message } });
+  }
 });
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
-app.get("/", (req, res) => res.json({ name: "automateapp-mcp", status: "running", endpoint: "/mcp" }));
+app.get("/", (req, res) => res.json({ name: "automateapp-mcp", status: "running" }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`MCP server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`MCP server on port ${PORT}`));
